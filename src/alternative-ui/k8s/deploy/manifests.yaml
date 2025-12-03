@@ -1,0 +1,174 @@
+# Kubernetes manifests for deploying the k8s-collector
+# This collector pushes metrics to the Alternative UI server
+#
+# Usage:
+#   1. Create the API key secret:
+#      kubectl create secret generic k8s-collector-secret \
+#        --namespace netdata-collector \
+#        --from-literal=API_KEY=your-api-key
+#
+#   2. Apply manifests:
+#      kubectl apply -f manifests.yaml
+#
+# Before applying, update:
+#   - PUSH_URL: URL of your Alternative UI server (e.g., https://your-app.fly.dev)
+#   - CLUSTER_NAME: A unique name for your cluster
+
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: netdata-collector
+  labels:
+    app.kubernetes.io/name: netdata-k8s-collector
+
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: k8s-collector
+  namespace: netdata-collector
+  labels:
+    app.kubernetes.io/name: netdata-k8s-collector
+
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: k8s-collector
+  labels:
+    app.kubernetes.io/name: netdata-k8s-collector
+rules:
+  # Core resources
+  - apiGroups: [""]
+    resources:
+      - nodes
+      - pods
+      - services
+      - namespaces
+      - configmaps
+      - secrets
+      - persistentvolumeclaims
+    verbs: ["get", "list", "watch"]
+  # Apps resources
+  - apiGroups: ["apps"]
+    resources:
+      - deployments
+      - replicasets
+      - daemonsets
+      - statefulsets
+    verbs: ["get", "list", "watch"]
+  # Metrics API (requires metrics-server)
+  - apiGroups: ["metrics.k8s.io"]
+    resources:
+      - nodes
+      - pods
+    verbs: ["get", "list"]
+
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: k8s-collector
+  labels:
+    app.kubernetes.io/name: netdata-k8s-collector
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: k8s-collector
+subjects:
+  - kind: ServiceAccount
+    name: k8s-collector
+    namespace: netdata-collector
+
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: k8s-collector-config
+  namespace: netdata-collector
+  labels:
+    app.kubernetes.io/name: netdata-k8s-collector
+data:
+  # Update this URL to your Alternative UI server
+  PUSH_URL: "https://netdata-k0s-demo.fly.dev"
+  # Name to identify this cluster
+  CLUSTER_NAME: "k0s-demo-cluster"
+  # Collection interval
+  INTERVAL: "10s"
+
+---
+# Secret for API key authentication
+# Replace 'changeme' with your actual API key, or create separately:
+#   kubectl create secret generic k8s-collector-secret -n netdata-collector --from-literal=API_KEY=your-key
+apiVersion: v1
+kind: Secret
+metadata:
+  name: k8s-collector-secret
+  namespace: netdata-collector
+  labels:
+    app.kubernetes.io/name: netdata-k8s-collector
+type: Opaque
+stringData:
+  # IMPORTANT: Change this to match the API_KEY set in your Fly.io deployment
+  API_KEY: "changeme"
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: k8s-collector
+  namespace: netdata-collector
+  labels:
+    app.kubernetes.io/name: netdata-k8s-collector
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: netdata-k8s-collector
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: netdata-k8s-collector
+    spec:
+      serviceAccountName: k8s-collector
+      containers:
+        - name: collector
+          image: ghcr.io/netdata/k8s-collector:latest
+          imagePullPolicy: Always
+          args:
+            - "-url"
+            - "$(PUSH_URL)"
+            - "-cluster-name"
+            - "$(CLUSTER_NAME)"
+            - "-interval"
+            - "$(INTERVAL)"
+            - "-api-key"
+            - "$(API_KEY)"
+          envFrom:
+            - configMapRef:
+                name: k8s-collector-config
+            - secretRef:
+                name: k8s-collector-secret
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 200m
+              memory: 128Mi
+          securityContext:
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            runAsUser: 1000
+            capabilities:
+              drop:
+                - ALL
+      # Prefer running on controller/master nodes for better k0s detection
+      tolerations:
+        - key: node-role.kubernetes.io/control-plane
+          operator: Exists
+          effect: NoSchedule
+        - key: node-role.kubernetes.io/master
+          operator: Exists
+          effect: NoSchedule
