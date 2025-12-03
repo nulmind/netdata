@@ -19,6 +19,8 @@
 //   -addr      Listen address (default: :19998)
 //   -retention Data retention duration (default: 1h)
 //   -api-key   API key for push authentication (optional)
+//   -username  Username for dashboard basic auth (optional)
+//   -password  Password for dashboard basic auth (optional)
 
 package main
 
@@ -48,8 +50,21 @@ func main() {
 	retention := flag.Duration("retention", 1*time.Hour, "Data retention duration")
 	maxPoints := flag.Int("max-points", 3600, "Maximum data points per dimension")
 	apiKey := flag.String("api-key", "", "API key for push authentication (optional)")
+	username := flag.String("username", "", "Username for dashboard basic auth (optional, or use AUTH_USERNAME env)")
+	password := flag.String("password", "", "Password for dashboard basic auth (optional, or use AUTH_PASSWORD env)")
 	showVersion := flag.Bool("version", false, "Show version")
 	flag.Parse()
+
+	// Allow environment variables to override flags
+	if *username == "" {
+		*username = os.Getenv("AUTH_USERNAME")
+	}
+	if *password == "" {
+		*password = os.Getenv("AUTH_PASSWORD")
+	}
+	if *apiKey == "" {
+		*apiKey = os.Getenv("API_KEY")
+	}
 
 	if *showVersion {
 		log.Printf("Netdata Alternative UI v%s", version)
@@ -66,12 +81,17 @@ func main() {
 	} else {
 		log.Printf("  API key: not configured (push endpoint is open)")
 	}
+	if *username != "" && *password != "" {
+		log.Printf("  Basic auth: enabled (user: %s)", *username)
+	} else {
+		log.Printf("  Basic auth: disabled (dashboard is public)")
+	}
 
 	// Create metrics store
 	store := metrics.NewStore(*retention, *maxPoints)
 
 	// Create and start HTTP server
-	srv := server.NewServer(store, *addr, *apiKey, webFS)
+	srv := server.NewServer(store, *addr, *apiKey, *username, *password, webFS)
 
 	// Handle shutdown gracefully
 	sigChan := make(chan os.Signal, 1)

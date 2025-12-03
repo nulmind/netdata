@@ -2,6 +2,13 @@
 #
 # Deploy with: flyctl launch --config fly.toml
 # or: flyctl deploy
+#
+# IMPORTANT: Set secrets before deploying:
+#   flyctl secrets set AUTH_USERNAME=admin AUTH_PASSWORD=your-secure-password API_KEY=your-api-key
+#
+# Authentication:
+#   - AUTH_USERNAME + AUTH_PASSWORD: Protects the web dashboard (HTTP Basic Auth)
+#   - API_KEY: Used by collectors to push metrics (X-API-Key header)
 
 app = "netdata-k0s-demo"
 primary_region = "ord"
@@ -14,6 +21,11 @@ primary_region = "ord"
   RETENTION = "1h"
   # Maximum data points per dimension
   MAX_POINTS = "3600"
+
+# Secrets (set via flyctl secrets set):
+# - AUTH_USERNAME: Username for dashboard login
+# - AUTH_PASSWORD: Password for dashboard login
+# - API_KEY: API key for metric push authentication
 
 [http_service]
   internal_port = 19998

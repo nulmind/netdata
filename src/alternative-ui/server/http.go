@@ -21,18 +21,22 @@ type Server struct {
 	store      *metrics.Store
 	addr       string
 	apiKey     string
+	username   string
+	password   string
 	wsHub      *WebSocketHub
 	webFS      embed.FS
 }
 
 // NewServer creates a new HTTP server
-func NewServer(store *metrics.Store, addr string, apiKey string, webFS embed.FS) *Server {
+func NewServer(store *metrics.Store, addr string, apiKey string, username string, password string, webFS embed.FS) *Server {
 	return &Server{
-		store:  store,
-		addr:   addr,
-		apiKey: apiKey,
-		wsHub:  NewWebSocketHub(store),
-		webFS:  webFS,
+		store:    store,
+		addr:     addr,
+		apiKey:   apiKey,
+		username: username,
+		password: password,
+		wsHub:    NewWebSocketHub(store),
+		webFS:    webFS,
 	}
 }
 
@@ -42,21 +46,27 @@ func (s *Server) Start() error {
 
 	mux := http.NewServeMux()
 
-	// API routes
+	// API routes - push uses API key auth, read endpoints use basic auth
 	mux.HandleFunc("/api/v1/push", s.corsMiddleware(s.authMiddleware(s.handlePush)))
-	mux.HandleFunc("/api/v1/nodes", s.corsMiddleware(s.handleNodes))
-	mux.HandleFunc("/api/v1/node/", s.corsMiddleware(s.handleNode))
-	mux.HandleFunc("/api/v1/charts/", s.corsMiddleware(s.handleCharts))
-	mux.HandleFunc("/api/v1/data/", s.corsMiddleware(s.handleData))
-	mux.HandleFunc("/api/v1/health", s.corsMiddleware(s.handleHealth))
+	mux.HandleFunc("/api/v1/nodes", s.corsMiddleware(s.basicAuthMiddleware(s.handleNodes)))
+	mux.HandleFunc("/api/v1/node/", s.corsMiddleware(s.basicAuthMiddleware(s.handleNode)))
+	mux.HandleFunc("/api/v1/charts/", s.corsMiddleware(s.basicAuthMiddleware(s.handleCharts)))
+	mux.HandleFunc("/api/v1/data/", s.corsMiddleware(s.basicAuthMiddleware(s.handleData)))
+	mux.HandleFunc("/api/v1/health", s.corsMiddleware(s.handleHealth)) // Health check stays open for Fly.io
 
-	// WebSocket
-	mux.HandleFunc("/ws", s.handleWebSocket)
+	// WebSocket - protected by basic auth
+	mux.HandleFunc("/ws", s.basicAuthMiddleware(s.handleWebSocket))
 
-	// Static files
-	mux.HandleFunc("/", s.handleStatic)
+	// Static files - protected by basic auth
+	mux.HandleFunc("/", s.basicAuthMiddleware(s.handleStatic))
 
 	log.Printf("Starting alternative UI server on %s", s.addr)
+	if s.username != "" {
+		log.Printf("Basic auth enabled for dashboard (user: %s)", s.username)
+	}
+	if s.apiKey != "" {
+		log.Printf("API key authentication enabled for push endpoint")
+	}
 	return http.ListenAndServe(s.addr, mux)
 }
 
@@ -88,6 +98,25 @@ func (s *Server) authMiddleware(next http.HandlerFunc) http.HandlerFunc {
 				http.Error(w, "Unauthorized", http.StatusUnauthorized)
 				return
 			}
+		}
+		next(w, r)
+	}
+}
+
+// basicAuthMiddleware checks HTTP Basic Auth for dashboard access
+func (s *Server) basicAuthMiddleware(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		// Skip auth if no credentials configured
+		if s.username == "" || s.password == "" {
+			next(w, r)
+			return
+		}
+
+		user, pass, ok := r.BasicAuth()
+		if !ok || user != s.username || pass != s.password {
+			w.Header().Set("WWW-Authenticate", `Basic realm="Netdata Alternative UI"`)
+			http.Error(w, "Unauthorized", http.StatusUnauthorized)
+			return
 		}
 		next(w, r)
 	}
