@@ -1,0 +1,221 @@
+# Deploy k0s Test Cluster Preview to Fly.io
+#
+# This workflow deploys the Alternative UI to Fly.io for PRs that modify
+# the k0s/alternative-ui code, and comments on the PR with credentials.
+#
+# Required secrets:
+#   FLY_API_TOKEN: Fly.io API token (get from https://fly.io/user/personal_access_tokens)
+
+name: Deploy k0s Preview
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, closed]
+    paths:
+      - 'src/alternative-ui/**'
+      - '.github/workflows/fly-preview.yml'
+
+  # Allow manual trigger
+  workflow_dispatch:
+    inputs:
+      pr_number:
+        description: 'PR number to deploy (optional, uses branch name if not provided)'
+        required: false
+
+concurrency:
+  group: fly-preview-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+env:
+  FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+
+jobs:
+  deploy-preview:
+    name: Deploy Preview
+    runs-on: ubuntu-latest
+    # Only run if PR is not closed and from the same repo (for security)
+    if: |
+      github.event.action != 'closed' &&
+      (github.event_name == 'workflow_dispatch' || github.event.pull_request.head.repo.full_name == github.repository)
+
+    outputs:
+      app_url: ${{ steps.deploy.outputs.app_url }}
+      app_name: ${{ steps.setup.outputs.app_name }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Fly.io CLI
+        uses: superfly/flyctl-actions/setup-flyctl@master
+
+      - name: Generate credentials and app name
+        id: setup
+        run: |
+          # Generate app name based on PR number or branch
+          if [ -n "${{ github.event.pull_request.number }}" ]; then
+            APP_NAME="netdata-k0s-pr-${{ github.event.pull_request.number }}"
+          elif [ -n "${{ github.event.inputs.pr_number }}" ]; then
+            APP_NAME="netdata-k0s-pr-${{ github.event.inputs.pr_number }}"
+          else
+            # Use branch name, sanitized
+            BRANCH_NAME="${GITHUB_REF_NAME//[^a-zA-Z0-9]/-}"
+            APP_NAME="netdata-k0s-${BRANCH_NAME:0:20}"
+          fi
+
+          # Generate secure credentials
+          AUTH_PASSWORD=$(openssl rand -base64 24 | tr -dc 'a-zA-Z0-9' | head -c 24)
+          API_KEY=$(openssl rand -base64 32 | tr -dc 'a-zA-Z0-9' | head -c 32)
+
+          # Output for later steps
+          echo "app_name=${APP_NAME}" >> $GITHUB_OUTPUT
+          echo "auth_password=${AUTH_PASSWORD}" >> $GITHUB_OUTPUT
+          echo "api_key=${API_KEY}" >> $GITHUB_OUTPUT
+
+          echo "App name: ${APP_NAME}"
+
+      - name: Create or update Fly.io app
+        id: deploy
+        working-directory: src/alternative-ui
+        run: |
+          APP_NAME="${{ steps.setup.outputs.app_name }}"
+          AUTH_PASSWORD="${{ steps.setup.outputs.auth_password }}"
+          API_KEY="${{ steps.setup.outputs.api_key }}"
+
+          # Check if app exists
+          if flyctl apps list | grep -q "^${APP_NAME}"; then
+            echo "App ${APP_NAME} exists, updating..."
+          else
+            echo "Creating new app ${APP_NAME}..."
+            flyctl apps create "${APP_NAME}" --org personal || true
+          fi
+
+          # Update fly.toml with the app name
+          sed -i "s/^app = .*/app = \"${APP_NAME}\"/" fly.toml
+
+          # Set secrets
+          flyctl secrets set \
+            AUTH_USERNAME=demo \
+            AUTH_PASSWORD="${AUTH_PASSWORD}" \
+            API_KEY="${API_KEY}" \
+            --app "${APP_NAME}"
+
+          # Deploy
+          flyctl deploy --app "${APP_NAME}" --remote-only
+
+          # Get the app URL
+          APP_URL="https://${APP_NAME}.fly.dev"
+          echo "app_url=${APP_URL}" >> $GITHUB_OUTPUT
+
+          echo "Deployed to: ${APP_URL}"
+
+      - name: Comment on PR
+        if: github.event_name == 'pull_request'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const appUrl = '${{ steps.deploy.outputs.app_url }}';
+            const appName = '${{ steps.setup.outputs.app_name }}';
+            const authPassword = '${{ steps.setup.outputs.auth_password }}';
+            const apiKey = '${{ steps.setup.outputs.api_key }}';
+
+            const body = `## 🚀 k0s Preview Deployment
+
+            Your preview environment is ready!
+
+            ### Dashboard Access
+            | | |
+            |---|---|
+            | **URL** | ${appUrl} |
+            | **Username** | \`demo\` |
+            | **Password** | \`${authPassword}\` |
+
+            ### Collector Configuration
+            To connect a k0s cluster to this preview:
+
+            \`\`\`bash
+            # Create the collector secret
+            kubectl create namespace netdata-collector --dry-run=client -o yaml | kubectl apply -f -
+            kubectl create secret generic k8s-collector-secret \\
+              --namespace netdata-collector \\
+              --from-literal=API_KEY=${apiKey} \\
+              --dry-run=client -o yaml | kubectl apply -f -
+
+            # Update and apply manifests
+            cd src/alternative-ui/k8s/deploy
+            sed -i 's|PUSH_URL:.*|PUSH_URL: "${appUrl}"|' manifests.yaml
+            kubectl apply -f manifests.yaml
+            \`\`\`
+
+            Or run the collector locally:
+            \`\`\`bash
+            cd src/alternative-ui/k8s
+            go build -o k8s-collector .
+            ./k8s-collector --url ${appUrl} --api-key ${apiKey} --cluster-name test
+            \`\`\`
+
+            ---
+            <details>
+            <summary>🔧 Deployment Info</summary>
+
+            - **App Name:** \`${appName}\`
+            - **Region:** ord (Chicago)
+            - **Fly.io Dashboard:** https://fly.io/apps/${appName}
+
+            </details>
+
+            > ⚠️ This preview will be automatically destroyed when the PR is closed.
+            `;
+
+            // Find existing comment
+            const { data: comments } = await github.rest.issues.listComments({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+            });
+
+            const botComment = comments.find(comment =>
+              comment.user.type === 'Bot' &&
+              comment.body.includes('k0s Preview Deployment')
+            );
+
+            if (botComment) {
+              // Update existing comment
+              await github.rest.issues.updateComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                comment_id: botComment.id,
+                body: body
+              });
+            } else {
+              // Create new comment
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: context.issue.number,
+                body: body
+              });
+            }
+
+  # Cleanup job - runs when PR is closed
+  cleanup:
+    name: Cleanup Preview
+    runs-on: ubuntu-latest
+    if: github.event.action == 'closed'
+
+    steps:
+      - name: Setup Fly.io CLI
+        uses: superfly/flyctl-actions/setup-flyctl@master
+
+      - name: Destroy preview app
+        env:
+          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+        run: |
+          APP_NAME="netdata-k0s-pr-${{ github.event.pull_request.number }}"
+
+          if flyctl apps list | grep -q "^${APP_NAME}"; then
+            echo "Destroying app ${APP_NAME}..."
+            flyctl apps destroy "${APP_NAME}" --yes
+          else
+            echo "App ${APP_NAME} not found, skipping cleanup"
+          fi

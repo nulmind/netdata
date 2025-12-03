@@ -2,6 +2,17 @@
 
 This guide walks you through setting up a complete k0s Kubernetes cluster with Netdata monitoring, all exposed via Fly.io for easy access.
 
+## Automatic PR Previews
+
+When you open a PR that modifies the alternative-ui code, a GitHub Actions workflow automatically:
+1. Deploys a preview environment to Fly.io
+2. Generates secure credentials
+3. Comments on the PR with the URL and login details
+
+Just look for the bot comment on your PR!
+
+> **Note:** Requires `FLY_API_TOKEN` secret to be configured in the repository.
+
 ## Quick Start
 
 The fastest way to get started is using the setup script:
